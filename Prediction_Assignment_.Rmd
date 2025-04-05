@@ -1,0 +1,230 @@
+---
+title: "Human Activity Recognition (HAR) - Predicting Exercise Correctness"
+author: "Xavier"
+date: "2025-04-04"
+output:
+  pdf_document: default
+  html_document:
+    toc: true
+    toc_depth: 3
+    theme: journal
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Install and load required packages
+required_packages <- c("randomForest", "caret", "rpart", "rpart.plot", "gbm", 
+                      "doParallel", "ggplot2", "dplyr", "knitr", "corrplot")
+invisible(lapply(required_packages, function(pkg) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg)
+    library(pkg, character.only = TRUE)
+  }
+}))
+```
+
+# Machine Learning Course Project
+
+## Introduction
+
+Wearable fitness devices (e.g., Fitbit, Jawbone Up) have revolutionized personal health monitoring by tracking physical activity. However, most devices don't assess exercise form quality. This project uses sensor data from:
+
+Belt
+Forearm
+Arm
+Dumbbell
+
+to classify barbell lift execution quality into five categories:
+
+Class	Description
+A	Correct execution
+B	Elbows too far front
+C	Lifting halfway
+D	Lowering halfway
+E	Hips too far forward
+
+### Research Question: Can we accurately predict exercise form quality from sensor data?
+
+# Data Preparation
+
+## 1. Data Loading and Initial Exploration
+
+```{r}
+# Load datasets
+train_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+test_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+training <- read.csv(url(train_url), na.strings = c("NA", "#DIV/0!", ""))
+testing <- read.csv(url(test_url), na.strings = c("NA", "#DIV/0!", ""))
+
+# Initial dimensions
+dim(training)
+dim(testing)
+```
+
+## 2. Data Cleaning
+```{r}
+# Remove columns with >95% NA values
+na_cols <- colMeans(is.na(training)) > 0.95
+training <- training[, !na_cols]
+testing <- testing[, !na_cols]
+
+# Remove metadata columns (first 7 columns)
+training <- training[, -(1:7)]
+testing <- testing[, -(1:7)]
+
+# Convert classe to factor
+training$classe <- factor(training$classe)
+
+# Check final dimensions
+cat("Training dimensions:", dim(training), "\n")
+cat("Testing dimensions:", dim(testing))
+```
+
+## 3. Data Splitting
+```{r}
+set.seed(123)
+train_index <- createDataPartition(training$classe, p = 0.6, list = FALSE)
+train_data <- training[train_index, ]
+valid_data <- training[-train_index, ]
+
+# Class distribution
+prop.table(table(train_data$classe)) * 100
+```
+
+# Exploratory Data Analysis
+```{r}
+# Class distribution plot
+ggplot(train_data, aes(x = classe, fill = classe)) + 
+  geom_bar() +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Class Distribution in Training Data",
+       x = "Exercise Quality Class",
+       y = "Count") +
+  theme_minimal()
+
+# Feature correlation visualization
+numeric_cols <- sapply(train_data, is.numeric)
+cor_matrix <- cor(train_data[, numeric_cols], use = "complete.obs")
+corrplot::corrplot(cor_matrix, method = "color", type = "upper", 
+                   tl.cex = 0.7, tl.col = "black")
+```
+
+# Model Development
+
+## 1. Decision Tree Model
+```{r}
+set.seed(123)
+tree_model <- rpart(classe ~ ., 
+                   data = train_data, 
+                   method = "class",
+                   control = rpart.control(cp = 0.01))
+
+rpart.plot(tree_model, 
+           main = "Exercise Classification Decision Tree",
+           box.palette = "BuGn",
+           shadow.col = "gray",
+           nn = TRUE)
+```
+
+## 2. Gradient Boosting Model
+```{r}
+# Set up parallel processing
+cl <- makePSOCKcluster(4)
+registerDoParallel(cl)
+
+set.seed(123)
+gbm_model <- train(classe ~ ., 
+                  data = train_data, 
+                  method = "gbm",
+                  trControl = trainControl(method = "cv", number = 5),
+                  verbose = FALSE,
+                  tuneLength = 3)
+
+stopCluster(cl)
+
+# Model summary
+print(gbm_model)
+plot(gbm_model)
+```
+
+## 3. Random Forest Model
+```{r}
+# Reduced number of trees for demonstration
+set.seed(123)
+rf_model <- randomForest(classe ~ ., 
+                        data = train_data,
+                        ntree = 100,
+                        importance = TRUE)
+
+# Variable importance
+varImpPlot(rf_model, main = "Random Forest - Variable Importance")
+```
+
+# Model Evaluation
+
+```{r model-evaluation}
+evaluate_model <- function(model, data, model_name) {
+        tryCatch({
+                # Get predictions (handle different model types)
+                if(inherits(model, "rpart")) {
+                        pred <- predict(model, newdata = data, type = "class")
+                } else {
+                        pred <- predict(model, newdata = data)
+                }
+                
+                # Convert to factor if needed
+                if(!is.factor(pred)) {
+                        pred <- factor(pred, levels = levels(data$classe))
+                }
+                
+                # Verify lengths match
+                if(length(pred) != length(data$classe)) {
+                        stop("Prediction length doesn't match data length")
+                }
+                
+                # Create confusion matrix
+                cm <- confusionMatrix(pred, data$classe)
+                
+                # Return performance metrics
+                data.frame(
+                        Model = model_name,
+                        Accuracy = cm$overall['Accuracy'],
+                        Kappa = cm$overall['Kappa'],
+                        Sensitivity = mean(cm$byClass[,'Sensitivity']),
+                        Specificity = mean(cm$byClass[,'Specificity']),
+                        stringsAsFactors = FALSE
+                )
+        }, error = function(e) {
+                message("Error evaluating ", model_name, ": ", e$message)
+                return(NULL)
+        })
+}
+
+results <- list(
+        tree = evaluate_model(tree_model, valid_data, "Decision Tree"),
+        gbm = evaluate_model(gbm_model, valid_data, "Gradient Boosting"),
+        rf = evaluate_model(rf_model, valid_data, "Random Forest")
+)
+
+# Display formatted results
+knitr::kable(results, digits = 4, caption = "Model Performance Comparison")
+```
+
+# Final Model Selection
+Based on the evaluation results, we select the Random Forest model due to its superior performance.
+
+```{r}
+# Make predictions on test set
+test_predictions <- predict(rf_model, newdata = testing)
+test_predictions
+```
+
+# Conclusion
+
+1. The Random Forest model achieved 99% accuracy on the validation set.
+2. Key predictive features included belt sensor measurements and dumbbell movement patterns.
+3. The model demonstrates strong capability in distinguishing between correct and incorrect exercise forms.
+

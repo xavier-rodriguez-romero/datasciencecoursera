@@ -3,11 +3,11 @@ title: "Human Activity Recognition (HAR) - Predicting Exercise Correctness"
 author: "Xavier"
 date: "2025-04-04"
 output:
-  pdf_document: default
   html_document:
     toc: true
     toc_depth: 3
     theme: journal
+  pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
